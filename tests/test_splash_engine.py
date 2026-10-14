@@ -1603,3 +1603,30 @@ class TestVision:
             vision, draft, 65536, "int8"
         ) - splash_memory_estimate(text_only, draft, 65536, "int8")
         assert delta == splash_mod._VISION_RESERVE_BYTES
+
+    async def test_responses_input_image_reaches_splash_as_image_url(self, tmp_path):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                200, content=_sse({"choices": [{"delta": {"content": "ok"}}]})
+            )
+
+        _vision_engine(tmp_path)
+        engine = _engine_with_transport(tmp_path, handler)
+        url = "data:image/png;base64,AAAA"
+        message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "?"},
+                {"type": "input_image", "image_url": url, "detail": "auto"},
+            ],
+        }
+
+        [o async for o in engine.stream_chat([message])]
+
+        assert seen["body"]["messages"][0]["content"] == [
+            {"type": "text", "text": "?"},
+            {"type": "image_url", "image_url": {"url": url, "detail": "auto"}},
+        ]

@@ -112,8 +112,10 @@ _DRAFT_LOAD_RATIO = 1 / 3
 # Scratch Splash plans beside the weights: prefill, decode and lane states.
 _RUNTIME_RESERVE_BYTES = 3 * 1024**3
 # Vision scratch for one image at Splash's default --max-image-pixels; the
-# vision tower's weights are already in the checkpoint's safetensors.
-_VISION_RESERVE_BYTES = 1 * 1024**3
+# vision tower's weights are already in the checkpoint's safetensors. Measured
+# with Splash 1.3.1 on Qwen3.8-27B: under the same --max-memory, loading the
+# vision tower planned 28,672 fewer context tokens (896 int8 KV pages, 0.89 GiB).
+_VISION_RESERVE_BYTES = int(0.9 * 1024**3)
 # Content parts Splash takes beside text: images (it also reads PDFs, which
 # oMLX's request models do not carry).
 _SPLASH_MEDIA_TYPES = frozenset({"image_url", "input_image", "image"})
@@ -516,10 +518,15 @@ def splash_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """OpenAI-format messages for Splash.
 
     oMLX hands engines template-format tool calls, whose arguments may be a
-    dict; the OpenAI API Splash implements wants a JSON string.
+    dict; the OpenAI API Splash implements wants a JSON string. The Responses
+    API path keeps its ``input_image`` parts, which Splash's chat API takes
+    as ``image_url`` parts.
     """
     converted = []
     for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            message = {**message, "content": [_chat_part(p) for p in content]}
         calls = message.get("tool_calls")
         if not calls:
             converted.append(message)
@@ -533,6 +540,19 @@ def splash_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             fixed.append({**call, "type": "function", "function": function})
         converted.append({**message, "tool_calls": fixed})
     return converted
+
+
+def _chat_part(part: Any) -> Any:
+    """A Responses ``input_image`` part as a chat ``image_url`` part."""
+    if not isinstance(part, dict) or part.get("type") != "input_image":
+        return part
+    url = part.get("image_url")
+    if isinstance(url, dict):
+        url = url.get("url")
+    image_url = {"url": url}
+    if part.get("detail"):
+        image_url["detail"] = part["detail"]
+    return {"type": "image_url", "image_url": image_url}
 
 
 def _check_media(messages: list[dict[str, Any]]) -> None:
